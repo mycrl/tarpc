@@ -1,20 +1,87 @@
-use crate::util::{Compact, TimeUntil};
+use crate::{
+    time::Instant,
+    util::{Compact, TimeUntil},
+};
 use fnv::FnvHashMap;
 use futures::future::{AbortHandle, AbortRegistration};
 use std::{
     collections::hash_map,
     task::{Context, Poll},
-    time::Instant,
+    time::Duration,
 };
+#[cfg(not(target_family = "wasm"))]
 use tokio_util::time::delay_queue::{self, DelayQueue};
 use tracing::Span;
+
+#[cfg(not(target_family = "wasm"))]
+type DeadlineKey = delay_queue::Key;
+#[cfg(target_family = "wasm")]
+type DeadlineKey = ();
+
+/// Native servers enforce request deadlines with Tokio's timer. Browser builds
+/// keep the same API surface but do not install local timer resources, because
+/// the browser client never runs a server channel.
+#[derive(Debug, Default)]
+struct Deadlines {
+    #[cfg(not(target_family = "wasm"))]
+    inner: DelayQueue<u64>,
+}
+
+impl Deadlines {
+    fn insert(&mut self, request_id: u64, timeout: Duration) -> DeadlineKey {
+        #[cfg(not(target_family = "wasm"))]
+        {
+            self.inner.insert(request_id, timeout)
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            let _ = (request_id, timeout);
+        }
+    }
+
+    fn remove(&mut self, key: &DeadlineKey) {
+        #[cfg(not(target_family = "wasm"))]
+        {
+            self.inner.remove(key);
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            let _ = key;
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        #[cfg(not(target_family = "wasm"))]
+        {
+            self.inner.is_empty()
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            true
+        }
+    }
+
+    fn poll_expired(&mut self, cx: &mut Context<'_>) -> Poll<Option<u64>> {
+        #[cfg(not(target_family = "wasm"))]
+        {
+            self.inner
+                .poll_expired(cx)
+                .map(|expired| expired.map(|expired| expired.into_inner()))
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            let _ = cx;
+            Poll::Ready(None)
+        }
+    }
+}
 
 /// A data structure that tracks in-flight requests. It aborts requests,
 /// either on demand or when a request deadline expires.
 #[derive(Debug, Default)]
 pub struct InFlightRequests {
     request_data: FnvHashMap<u64, RequestData>,
-    deadlines: DelayQueue<u64>,
+    deadlines: Deadlines,
 }
 
 /// Data needed to clean up a single in-flight request.
@@ -23,7 +90,7 @@ struct RequestData {
     /// Aborts the response handler for the associated request.
     abort_handle: AbortHandle,
     /// The key to remove the timer for the request's deadline.
-    deadline_key: delay_queue::Key,
+    deadline_key: DeadlineKey,
     /// The client span.
     span: Span,
 }
@@ -104,14 +171,14 @@ impl InFlightRequests {
             let expired = expired?;
             if let Some(RequestData {
                 abort_handle, span, ..
-            }) = self.request_data.remove(expired.get_ref())
+            }) = self.request_data.remove(&expired)
             {
                 let _entered = span.enter();
                 self.request_data.compact(0.1);
                 abort_handle.abort();
                 tracing::error!("DeadlineExceeded");
             }
-            Some(expired.into_inner())
+            Some(expired)
         })
     }
 }

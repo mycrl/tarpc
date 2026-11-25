@@ -6,23 +6,83 @@ use fnv::FnvHashMap;
 use std::{
     collections::hash_map,
     task::{Context, Poll},
+    time::Duration,
 };
 use tokio::sync::oneshot;
+#[cfg(not(target_family = "wasm"))]
 use tokio_util::time::delay_queue::{self, DelayQueue};
 use tracing::Span;
+
+#[cfg(not(target_family = "wasm"))]
+type DeadlineKey = delay_queue::Key;
+#[cfg(target_family = "wasm")]
+type DeadlineKey = ();
+
+/// `tokio_util::time::DelayQueue` is backed by Tokio's clock, which is not
+/// available on `wasm32-unknown-unknown`. Native clients retain deadline
+/// enforcement; browser clients still send the deadline to the server but do
+/// not run a local deadline timer.
+#[derive(Debug, Default)]
+struct Deadlines {
+    #[cfg(not(target_family = "wasm"))]
+    inner: DelayQueue<u64>,
+}
+
+impl Deadlines {
+    fn insert(&mut self, request_id: u64, timeout: Duration) -> DeadlineKey {
+        #[cfg(not(target_family = "wasm"))]
+        {
+            self.inner.insert(request_id, timeout)
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            let _ = (request_id, timeout);
+        }
+    }
+
+    fn remove(&mut self, key: &DeadlineKey) {
+        #[cfg(not(target_family = "wasm"))]
+        {
+            self.inner.remove(key);
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            let _ = key;
+        }
+    }
+
+    fn clear(&mut self) {
+        #[cfg(not(target_family = "wasm"))]
+        self.inner.clear();
+    }
+
+    fn poll_expired(&mut self, cx: &mut Context<'_>) -> Poll<Option<u64>> {
+        #[cfg(not(target_family = "wasm"))]
+        {
+            self.inner
+                .poll_expired(cx)
+                .map(|expired| expired.map(|expired| expired.into_inner()))
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            let _ = cx;
+            Poll::Pending
+        }
+    }
+}
 
 /// Requests already written to the wire that haven't yet received responses.
 #[derive(Debug)]
 pub struct InFlightRequests<Resp> {
     request_data: FnvHashMap<u64, RequestData<Resp>>,
-    deadlines: DelayQueue<u64>,
+    deadlines: Deadlines,
 }
 
 impl<Resp> Default for InFlightRequests<Resp> {
     fn default() -> Self {
         Self {
             request_data: FnvHashMap::default(),
-            deadlines: DelayQueue::default(),
+            deadlines: Deadlines::default(),
         }
     }
 }
@@ -33,7 +93,7 @@ struct RequestData<Res> {
     span: Span,
     response_completion: oneshot::Sender<Res>,
     /// The key to remove the timer for the request's deadline.
-    deadline_key: delay_queue::Key,
+    deadline_key: DeadlineKey,
 }
 
 /// An error returned when an attempt is made to insert a request with an ID that is already in
@@ -124,7 +184,7 @@ impl<Res> InFlightRequests<Res> {
         expired_error: impl Fn() -> Res,
     ) -> Poll<Option<u64>> {
         self.deadlines.poll_expired(cx).map(|expired| {
-            let request_id = expired?.into_inner();
+            let request_id = expired?;
             if let Some(request_data) = self.request_data.remove(&request_id) {
                 let _entered = request_data.span.enter();
                 tracing::error!("DeadlineExceeded");

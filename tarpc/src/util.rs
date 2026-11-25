@@ -4,10 +4,11 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+use crate::time::Instant;
 use std::{
     collections::HashMap,
     hash::{BuildHasher, Hash},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 pub(crate) mod print_err;

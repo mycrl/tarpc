@@ -7,13 +7,11 @@
 //! Provides a request context that carries a deadline and trace context. This context is sent from
 //! client to server and is used by the server to enforce response deadlines.
 
+use crate::time::Instant;
 use crate::trace::{self, TraceId};
 use opentelemetry::trace::TraceContextExt;
 use static_assertions::assert_impl_all;
-use std::{
-    convert::TryFrom,
-    time::{Duration, Instant},
-};
+use std::{convert::TryFrom, time::Duration};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// A request context that carries request-scoped information like deadlines and trace information.
@@ -40,8 +38,9 @@ pub struct Context {
 
 #[cfg(feature = "serde1")]
 mod absolute_to_relative_time {
+    use crate::time::Instant;
     pub use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    pub use std::time::{Duration, Instant};
+    pub use std::time::Duration;
 
     pub fn serialize<S>(deadline: &Instant, serializer: S) -> Result<S::Ok, S::Error>
     where

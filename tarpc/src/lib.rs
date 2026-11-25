@@ -245,12 +245,14 @@ pub(crate) mod cancellations;
 pub mod client;
 pub mod context;
 pub mod server;
+mod time;
 pub mod transport;
 pub(crate) mod util;
 
 pub use crate::transport::sealed::Transport;
 
-use std::{any::Any, error::Error, io, sync::Arc, time::Instant};
+use crate::time::Instant;
+use std::{any::Any, error::Error, io, sync::Arc};
 
 /// A message from a client to a server.
 #[derive(Debug)]
